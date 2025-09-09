@@ -1,11 +1,19 @@
 from __future__ import annotations
+
+# --- robust import path shim (fixes ModuleNotFoundError on Streamlit Cloud / containers) ---
+import sys, pathlib
+ROOT = pathlib.Path(__file__).resolve().parents[1]  # repo root (…/comply)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# -------------------------------------------------------------------------------------------
+
 import os
 import logging
 from datetime import datetime
 import streamlit as st
 import pandas as pd
 
-# 🔁 absolute imports (fix for ImportError in Streamlit)
+# absolute imports (now safe)
 from app.utils.logging_conf import setup_logging
 from app.models.schemas import REQUIRED_HEADERS, normalize_status_values, validate_headers
 from app.components.kpis import render_kpis
