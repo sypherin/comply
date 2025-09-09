@@ -4,7 +4,8 @@ import logging
 import requests
 from typing import Optional, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from .auth_msal import get_access_token
+# 🔁 absolute import (fix)
+from app.services.auth_msal import get_access_token
 
 logger = logging.getLogger("graph")
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -29,9 +30,18 @@ class GraphClient:
             logger.warning("manager lookup failed status=%s", resp.status_code)
             return None
 
-    @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=20), retry=retry_if_exception_type(requests.RequestException))
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=20),
+        retry=retry_if_exception_type(requests.RequestException),
+    )
     def send_mail(self, sender_user_id: str, to: List[str], cc: List[str], subject: str, html_body: str) -> str:
-        endpoint = f"{GRAPH_BASE}/me/sendMail" if sender_user_id in ("", "me", None) else f"{GRAPH_BASE}/users/{sender_user_id}/sendMail"
+        endpoint = (
+            f"{GRAPH_BASE}/me/sendMail"
+            if sender_user_id in ("", "me", None)
+            else f"{GRAPH_BASE}/users/{sender_user_id}/sendMail"
+        )
         payload = {
             "message": {
                 "subject": subject,
@@ -45,7 +55,7 @@ class GraphClient:
         resp = requests.post(endpoint, headers=headers, json=payload, timeout=15)
         if resp.status_code in (202, 200):
             logger.info("send_mail ok to=%s cc=%s", to, cc)
-            return resp.headers.get("x-ms-ags-diagnostic","")
+            return resp.headers.get("x-ms-ags-diagnostic", "")
         logger.warning("send_mail failed status=%s to=%s cc=%s", resp.status_code, to, cc)
         resp.raise_for_status()
         return ""
