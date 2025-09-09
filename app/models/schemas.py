@@ -1,25 +1,24 @@
 from __future__ import annotations
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
-import pandas as pd
 
 REQUIRED_HEADERS = [
-    "Learner", "First Name", "Last Name", "Email Address", "Manager Email",
-    "Course Title", "Completion Status", "Required Date", "Org", "BU", "Department"
+    'Learner', 'First Name', 'Last Name', 'Email Address', 'Manager Email',
+    'Course Title', 'Completion Status', 'Required Date', 'Org', 'BU', 'Department'
 ]
 
 STATUS_MAP = {
-    "complete": "Completed",
-    "completed": "Completed",
-    "done": "Completed",
-    "in progress": "In Progress",
-    "not started": "Not Started",
-    "incomplete": "Not Started",
+    'complete': 'Completed',
+    'completed': 'Completed',
+    'done': 'Completed',
+    'in progress': 'In Progress',
+    'not started': 'Not Started',
+    'incomplete': 'Not Started',
 }
 
 def normalize_status_values(v: str) -> str:
     if not isinstance(v, str):
-        return "Not Started"
+        return 'Not Started'
     key = v.strip().lower()
     return STATUS_MAP.get(key, v.strip())
 
@@ -46,7 +45,7 @@ class UploadRow(BaseModel):
     BU: str
     Department: str
 
-    @field_validator("Completion_Status")
+    @field_validator('Completion_Status')
     @classmethod
     def norm_status(cls, v):
         return normalize_status_values(v)
