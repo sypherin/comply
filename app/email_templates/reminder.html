@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Reminder</title>
+  <style>
+    body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111; }
+    .card { max-width: 640px; margin: 0 auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+    .btn { display: inline-block; padding: 10px 16px; text-decoration: none; border-radius: 6px; background:#0F6CBD; color:#fff; }
+    .muted { color:#6b7280; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p>Hi {{LEARNER_NAME}},</p>
+    <p>This is a friendly reminder that you have outstanding mandatory learning items:</p>
+    <ul>
+      {{COURSE_LIST}}
+    </ul>
+    <p>Please complete them by the required date. If you have already completed them recently, you can ignore this message.</p>
+    <p>Regards,<br/>{{SENDER_NAME}}</p>
+    <p class="muted">This email contains confidential information for {{LEARNER_EMAIL}}. Do not forward externally.</p>
+  </div>
+</body>
+</html>
