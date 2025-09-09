@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-# --- robust import path shim (fixes ModuleNotFoundError on Streamlit Cloud / containers) ---
+# --- robust import path shim (works anywhere) ---
 import sys, pathlib
-ROOT = pathlib.Path(__file__).resolve().parents[1]  # repo root (…/comply)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# -------------------------------------------------------------------------------------------
+# -------------------------------------------------
 
 import os
 import logging
@@ -13,7 +13,6 @@ from datetime import datetime
 import streamlit as st
 import pandas as pd
 
-# absolute imports (now safe)
 from app.utils.logging_conf import setup_logging
 from app.models.schemas import REQUIRED_HEADERS, normalize_status_values, validate_headers
 from app.components.kpis import render_kpis
@@ -29,25 +28,32 @@ setup_logging()
 logger = logging.getLogger("app")
 
 APP_ENV = os.getenv("APP_ENV", "local")
-AUTH_MODE = os.getenv("AUTH_MODE", "msal")
+AUTH_MODE = os.getenv("AUTH_MODE", "msal")  # msal | easy_auth | demo
 ALLOWED_EMAIL_DOMAINS = [d.strip().lower() for d in os.getenv("ALLOWED_EMAIL_DOMAINS", "").split(",") if d.strip()]
 USE_AZURE_SQL = os.getenv("USE_AZURE_SQL", "false").lower() == "true"
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "90"))
+OFFLINE_MODE = os.getenv("OFFLINE_MODE", "false").lower() == "true"
 
 st.set_page_config(page_title="Compliance Dashboard", layout="wide")
 
 def require_auth() -> dict:
-    if AUTH_MODE == "easy_auth":
+    """Return user principal dict with name, email, oid."""
+    if AUTH_MODE == "demo":
+        # dead-end auth (no cloud): provide a fixed demo principal
+        user = {"name": "Demo User", "email": "demo.user@example.com", "oid": "demo-oid"}
+    elif AUTH_MODE == "easy_auth":
         user = get_user_from_easy_auth(st.session_state.get("request_headers", {}))
     else:
         ensure_sign_in()
         _ = get_access_token(["User.Read"])
         user = st.session_state.get("user_principal", {})
+
     if not user:
         st.stop()
 
+    # Domain allow-list still applies unless in demo
     email = (user.get("email") or "").lower()
-    if ALLOWED_EMAIL_DOMAINS and not any(
+    if AUTH_MODE != "demo" and ALLOWED_EMAIL_DOMAINS and not any(
         email.endswith("@" + d) or email.split("@")[-1] == d for d in ALLOWED_EMAIL_DOMAINS
     ):
         st.error("Your email domain is not allowed to access this application.")
@@ -93,13 +99,13 @@ def render_sidebar(user):
 
     st.sidebar.divider()
     st.sidebar.subheader("Email Reminders")
-    cc_managers = st.sidebar.checkbox("CC Managers", value=True)
-    dry_run = st.sidebar.checkbox("Dry Run (no send)", value=True)
+    cc_managers = st.sidebar.checkbox("CC Managers", value=True, disabled=OFFLINE_MODE)
+    dry_run_default = True if OFFLINE_MODE else True
+    dry_run = st.sidebar.checkbox("Dry Run (no send)", value=dry_run_default)
+    if OFFLINE_MODE:
+        st.sidebar.caption("Offline mode: emails are simulated; nothing will be sent.")
     if st.sidebar.button("Send reminders for incomplete"):
-        set_state(
-            "reminder_action",
-            {"cc_managers": cc_managers, "dry_run": dry_run, "ts": datetime.utcnow().isoformat()},
-        )
+        set_state("reminder_action", {"cc_managers": cc_managers, "dry_run": dry_run, "ts": datetime.utcnow().isoformat()})
 
     if USE_AZURE_SQL:
         st.sidebar.divider()
@@ -116,8 +122,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_and_send_reminders(user, df: pd.DataFrame):
-    cfg_scopes = os.getenv("GRAPH_SCOPES", "User.Read Mail.Send Directory.Read.All")
-    client = GraphClient()
+    client = GraphClient()  # becomes a no-op if OFFLINE_MODE=true
     incomplete = df[df["Completion Status"] != "Completed"]
     if incomplete.empty:
         st.info("No incomplete items found.")
@@ -128,24 +133,16 @@ def compute_and_send_reminders(user, df: pd.DataFrame):
     for learner_email, sub in by_user:
         learner_name = sub.iloc[0].get("Learner") or f"{sub.iloc[0].get('First Name','')} {sub.iloc[0].get('Last Name','')}".strip()
         manager_email = sub.iloc[0].get("Manager Email")
-        if not manager_email and "Directory.Read.All" in cfg_scopes:
-            try:
-                manager_email = client.get_manager(learner_email)
-            except Exception:
-                manager_email = None
+        if not manager_email:
+            manager_email = client.get_manager(learner_email)  # offline returns None
 
-        rows = "".join(
-            f"<li>{r['Course Title']} (required: {str(r.get('Required Date','')).split(' ')[0]})</li>"
-            for _, r in sub.iterrows()
-        )
+        rows = "".join(f"<li>{r['Course Title']} (required: {str(r.get('Required Date','')).split(' ')[0]})</li>" for _, r in sub.iterrows())
         with open(os.path.join(os.path.dirname(__file__), "email_templates", "reminder.html"), "r", encoding="utf-8") as f:
             template = f.read()
-        html = (
-            template.replace("{{LEARNER_NAME}}", learner_name or learner_email)
-            .replace("{{LEARNER_EMAIL}}", learner_email)
-            .replace("{{COURSE_LIST}}", rows)
-            .replace("{{SENDER_NAME}}", user.get("name") or "Compliance Team")
-        )
+        html = template.replace("{{LEARNER_NAME}}", learner_name or learner_email)\
+                       .replace("{{LEARNER_EMAIL}}", learner_email)\
+                       .replace("{{COURSE_LIST}}", rows)\
+                       .replace("{{SENDER_NAME}}", user.get("name") or "Compliance Team")
 
         cc = [manager_email] if manager_email and (get_state("reminder_action") or {}).get("cc_managers", True) else []
         dry_run = (get_state("reminder_action") or {}).get("dry_run", True)
@@ -161,14 +158,10 @@ def compute_and_send_reminders(user, df: pd.DataFrame):
                     subject="Action required: Mandatory learning pending",
                     html_body=html,
                 )
-                results.append(
-                    {"email": learner_email, "status": "sent", "id": msg_id, "cc": cc, "course_count": int(sub.shape[0])}
-                )
+                results.append({"email": learner_email, "status": "sent", "id": msg_id, "cc": cc, "course_count": int(sub.shape[0])})
             except Exception as ex:
                 logging.exception("send_mail failed (metadata only)")
-                results.append(
-                    {"email": learner_email, "status": f"error: {ex}", "cc": cc, "course_count": int(sub.shape[0])}
-                )
+                results.append({"email": learner_email, "status": f"error: {ex}", "cc": cc, "course_count": int(sub.shape[0])})
     st.success(f"Reminder processing complete — {len(results)} targeted.")
     return results
 
@@ -194,10 +187,7 @@ def main():
     q = st.text_input("Search by name or email")
     if q:
         ql = q.strip().lower()
-        per = df[
-            (df["Learner"].str.lower().str.contains(ql, na=False))
-            | (df["Email Address"].str.lower() == ql)
-        ]
+        per = df[(df["Learner"].str.lower().str.contains(ql, na=False)) | (df["Email Address"].str.lower() == ql)]
         st.dataframe(per.sort_values(["Learner", "Course Title"]))
 
     if USE_AZURE_SQL and get_state("save_dataset"):
