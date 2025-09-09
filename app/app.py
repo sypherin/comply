@@ -112,4 +112,96 @@ def compute_and_send_reminders(user, df: pd.DataFrame):
     client = GraphClient()
     incomplete = df[df["Completion Status"] != "Completed"]
     if incomplete.empty:
-        st.info("No inc
+        st.info("No incomplete items found.")
+        return
+
+    by_user = incomplete.groupby("Email Address")
+    results = []
+    for learner_email, sub in by_user:
+        learner_name = sub.iloc[0].get("Learner") or f"{sub.iloc[0].get('First Name','')} {sub.iloc[0].get('Last Name','')}".strip()
+        manager_email = sub.iloc[0].get("Manager Email")
+        if not manager_email and "Directory.Read.All" in cfg_scopes:
+            try:
+                manager_email = client.get_manager(learner_email)
+            except Exception:
+                manager_email = None
+
+        rows = "".join(
+            f"<li>{r['Course Title']} (required: {str(r.get('Required Date','')).split(' ')[0]})</li>"
+            for _, r in sub.iterrows()
+        )
+        with open(os.path.join(os.path.dirname(__file__), "email_templates", "reminder.html"), "r", encoding="utf-8") as f:
+            template = f.read()
+        html = (
+            template.replace("{{LEARNER_NAME}}", learner_name or learner_email)
+            .replace("{{LEARNER_EMAIL}}", learner_email)
+            .replace("{{COURSE_LIST}}", rows)
+            .replace("{{SENDER_NAME}}", user.get("name") or "Compliance Team")
+        )
+
+        cc = [manager_email] if manager_email and (get_state("reminder_action") or {}).get("cc_managers", True) else []
+        dry_run = (get_state("reminder_action") or {}).get("dry_run", True)
+        if dry_run:
+            st.write(f"DRY RUN: would send to {learner_email} cc {cc}")
+            results.append({"email": learner_email, "status": "dry-run", "cc": cc, "course_count": int(sub.shape[0])})
+        else:
+            try:
+                msg_id = client.send_mail(
+                    sender_user_id=os.getenv("MAIL_SENDER_USER_ID") or "me",
+                    to=[learner_email],
+                    cc=cc,
+                    subject="Action required: Mandatory learning pending",
+                    html_body=html,
+                )
+                results.append(
+                    {"email": learner_email, "status": "sent", "id": msg_id, "cc": cc, "course_count": int(sub.shape[0])}
+                )
+            except Exception as ex:
+                logging.exception("send_mail failed (metadata only)")
+                results.append(
+                    {"email": learner_email, "status": f"error: {ex}", "cc": cc, "course_count": int(sub.shape[0])}
+                )
+    st.success(f"Reminder processing complete — {len(results)} targeted.")
+    return results
+
+def main():
+    user = require_auth()
+    st.sidebar.write(f"Signed in as **{user.get('name','')}** ({user.get('email','')})")
+
+    render_sidebar(user)
+    df = get_state("dataset")
+
+    if df is None or df.empty:
+        st.info("Upload a CSV to get started. Required headers: " + ", ".join(REQUIRED_HEADERS))
+        return
+
+    filtered = apply_filters(df)
+
+    kpi_cols = st.columns(3)
+    render_kpis(kpi_cols, filtered)
+    st.divider()
+    render_course_chart(filtered)
+
+    st.subheader("Individual Lookup")
+    q = st.text_input("Search by name or email")
+    if q:
+        ql = q.strip().lower()
+        per = df[
+            (df["Learner"].str.lower().str.contains(ql, na=False))
+            | (df["Email Address"].str.lower() == ql)
+        ]
+        st.dataframe(per.sort_values(["Learner", "Course Title"]))
+
+    if USE_AZURE_SQL and get_state("save_dataset"):
+        store = get_store()
+        n = store.save_dataset(filtered)
+        st.success(f"Saved {n} rows to Azure SQL.")
+
+    action = get_state("reminder_action")
+    if action and action.get("ts"):
+        results = compute_and_send_reminders(user, filtered)
+        store = get_store()
+        store.log_reminder_batch(user.get("email"), results or [])
+
+if __name__ == "__main__":
+    main()
