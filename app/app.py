@@ -1,3 +1,4 @@
+# app/app.py
 from __future__ import annotations
 
 # --- import path shim ---
@@ -18,7 +19,6 @@ from app.models.schemas import REQUIRED_HEADERS, normalize_status_values, valida
 from app.components.kpis import render_kpis
 from app.components.charts import render_course_chart
 from app.services.auth_easy_auth import get_user_from_easy_auth
-from app.services.auth_msal import ensure_sign_in, get_access_token
 from app.services.graph_client import GraphClient
 from app.services.data_store import InMemoryStore, SqlStore, get_sql_engine
 from app.services.security import scan_csv_basic
@@ -27,25 +27,32 @@ from app.utils.session import get_state, set_state
 setup_logging()
 logger = logging.getLogger("app")
 
-# ====== OFFLINE HARD SWITCH ======
-FORCE_DEMO = True  # set to False only when you actually configure Azure/MSAL
-# =================================
-
-APP_ENV = os.getenv("APP_ENV", "local")
-OFFLINE_MODE = True if FORCE_DEMO else (os.getenv("OFFLINE_MODE", "false").lower() == "true")
-
-_auth_mode_env = os.getenv("AUTH_MODE")
-AUTH_MODE = "demo" if FORCE_DEMO else (_auth_mode_env or ("demo" if OFFLINE_MODE else "msal")).lower()
+# ====== OFFLINE HARD DEFAULTS ======
+OFFLINE_MODE = True if os.getenv("OFFLINE_MODE", "").lower() in ("1", "true", "yes") else True  # force True
+AUTH_MODE = (os.getenv("AUTH_MODE") or "demo").lower()  # demo | msal | easy_auth
+if OFFLINE_MODE:
+    AUTH_MODE = "demo"  # force demo when offline
+# ===================================
 
 ALLOWED_EMAIL_DOMAINS = [d.strip().lower() for d in os.getenv("ALLOWED_EMAIL_DOMAINS", "").split(",") if d.strip()]
-USE_AZURE_SQL = False if FORCE_DEMO else (os.getenv("USE_AZURE_SQL", "false").lower() == "true")
+USE_AZURE_SQL = False  # force in-memory for offline/demo
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "90"))
+
+# Import MSAL helpers **only if** we’re truly in msal mode and not offline
+if AUTH_MODE == "msal" and not OFFLINE_MODE:
+    from app.services.auth_msal import ensure_sign_in, get_access_token  # type: ignore
+else:
+    # Safe no-op shims to ensure we never hit MSAL
+    def ensure_sign_in():  # type: ignore
+        return None
+    def get_access_token(scopes=None):  # type: ignore
+        raise RuntimeError("MSAL is disabled in demo/offline mode.")
 
 st.set_page_config(page_title="Compliance Dashboard", layout="wide")
 
 def require_auth() -> dict:
     """Return user principal dict with name, email, oid. Never touches cloud in demo/offline."""
-    if FORCE_DEMO or OFFLINE_MODE or AUTH_MODE == "demo":
+    if AUTH_MODE == "demo" or OFFLINE_MODE:
         return {"name": "Demo User", "email": "demo.user@example.com", "oid": "demo-oid"}
 
     if AUTH_MODE == "easy_auth":
@@ -69,7 +76,7 @@ def require_auth() -> dict:
     return user
 
 def get_store():
-    if USE_AZURE_SQL and not OFFLINE_MODE and not FORCE_DEMO:
+    if USE_AZURE_SQL and not OFFLINE_MODE and AUTH_MODE != "demo":
         engine = get_sql_engine()
         return SqlStore(engine=engine, retention_days=RETENTION_DAYS)
     return InMemoryStore()
@@ -107,18 +114,11 @@ def render_sidebar(user):
 
     st.sidebar.divider()
     st.sidebar.subheader("Email Reminders")
-    cc_managers = st.sidebar.checkbox("CC Managers", value=True, disabled=True)
+    cc_managers = st.sidebar.checkbox("CC Managers", value=False, disabled=True)
     dry_run = st.sidebar.checkbox("Dry Run (no send)", value=True)
     st.sidebar.caption("Demo/offline mode: emails are simulated; nothing will be sent.")
     if st.sidebar.button("Send reminders for incomplete"):
         set_state("reminder_action", {"cc_managers": cc_managers, "dry_run": dry_run, "ts": datetime.utcnow().isoformat()})
-
-    if USE_AZURE_SQL and not (OFFLINE_MODE or FORCE_DEMO):
-        st.sidebar.divider()
-        st.sidebar.subheader("Storage")
-        save_toggle = st.sidebar.checkbox("Persist dataset to Azure SQL", value=False)
-        set_state("save_dataset", save_toggle)
-        st.sidebar.caption(f"Retention: rows older than {RETENTION_DAYS} days are purged.")
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     filters = get_state("filters") or {}
@@ -128,7 +128,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_and_send_reminders(user, df: pd.DataFrame):
-    client = GraphClient()  # in offline mode this is a no-op stub
+    client = GraphClient()  # is a no-op in offline mode (see its own stub)
     incomplete = df[df["Completion Status"] != "Completed"]
     if incomplete.empty:
         st.info("No incomplete items found.")
@@ -138,7 +138,7 @@ def compute_and_send_reminders(user, df: pd.DataFrame):
     results = []
     for learner_email, sub in by_user:
         learner_name = sub.iloc[0].get("Learner") or f"{sub.iloc[0].get('First Name','')} {sub.iloc[0].get('Last Name','')}".strip()
-        manager_email = sub.iloc[0].get("Manager Email") or client.get_manager(learner_email)
+        manager_email = None  # disabled in demo
 
         rows = "".join(f"<li>{r['Course Title']} (required: {str(r.get('Required Date','')).split(' ')[0]})</li>" for _, r in sub.iterrows())
         with open(os.path.join(os.path.dirname(__file__), "email_templates", "reminder.html"), "r", encoding="utf-8") as f:
@@ -148,7 +148,7 @@ def compute_and_send_reminders(user, df: pd.DataFrame):
                        .replace("{{COURSE_LIST}}", rows)\
                        .replace("{{SENDER_NAME}}", user.get("name") or "Compliance Team")
 
-        cc = []  # disabled in demo
+        cc = []
         st.write(f"DRY RUN: would send to {learner_email} cc {cc}")
         results.append({"email": learner_email, "status": "dry-run", "cc": cc, "course_count": int(sub.shape[0])})
 
@@ -180,10 +180,7 @@ def main():
         per = df[(df["Learner"].str.lower().str.contains(ql, na=False)) | (df["Email Address"].str.lower() == ql)]
         st.dataframe(per.sort_values(["Learner", "Course Title"]))
 
-    if USE_AZURE_SQL and not (OFFLINE_MODE or FORCE_DEMO) and get_state("save_dataset"):
-        store = get_store()
-        n = store.save_dataset(filtered)
-        st.success(f"Saved {n} rows to Azure SQL.")
+    # No SQL save in offline/demo
 
     action = get_state("reminder_action")
     if action and action.get("ts"):
